@@ -141,13 +141,17 @@ const char *libcrun_get_intelrdt_name (const char *ctr_name, libcrun_container_t
 
 int libcrun_apply_intelrdt (const char *ctr_name, libcrun_container_t *container, pid_t pid, int actions, libcrun_error_t *err);
 
+int libcrun_move_network_devices (libcrun_container_t *container, pid_t pid, libcrun_error_t *err);
+
 int libcrun_destroy_intelrdt (const char *name, libcrun_error_t *err);
 
-int libcrun_update_intel_rdt (const char *ctr_name, libcrun_container_t *container, const char *l3_cache_schema, const char *mem_bw_schema, libcrun_error_t *err);
+int libcrun_update_intel_rdt (const char *ctr_name, libcrun_container_t *container, const char *l3_cache_schema, const char *mem_bw_schema, char *const *schemata, libcrun_error_t *err);
 
 int libcrun_safe_chdir (const char *path, libcrun_error_t *err);
 
-int get_bind_mount (int dirfd, const char *src, bool recursive, bool rdonly, libcrun_error_t *err);
+int get_bind_mount (int dirfd, const char *src, bool recursive, bool rdonly, bool nofollow, libcrun_error_t *err);
+
+bool is_bind_mount (runtime_spec_schema_defs_mount *mnt, bool *recursive, bool *src_nofollow);
 
 int libcrun_make_runtime_mounts (libcrun_container_t *container, libcrun_container_status_t *status, runtime_spec_schema_defs_mount **mounts, size_t len, libcrun_error_t *err);
 

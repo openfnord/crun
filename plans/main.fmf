@@ -24,18 +24,17 @@ prepare:
         - crun
         - podman-tests
 
-/upstream:
-    summary: Run crun specific Podman system tests on upstream PRs
+/shellcheck:
     discover+:
-        filter: tag:upstream
-    adjust+:
-        - enabled: false
-          when: initiator is not defined or initiator != packit
+        filter: 'tag:shellcheck'
+    enabled: true
+    adjust:
+        enabled: false
+        when: distro == centos-stream-10 or distro == rhel-10
+    prepare+:
+        - how: install
+          package: ShellCheck
 
-/downstream:
-    summary: Run crun specific Podman system tests on bodhi / errata and dist-git PRs
+/tests:
     discover+:
-        filter: tag:downstream
-    adjust+:
-        - enabled: false
-          when: initiator == packit
+        filter: 'tag:podman | tag:sanity'

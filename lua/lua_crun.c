@@ -49,16 +49,8 @@ static const char *LUA_CRUN_TAG_CONTS_ITER = "crun-containers-iterator";
       return luacrun_error (S, crun_err) + addret;             \
     }
 
-#if __STDC_VERSION__ < 201112L
-#  define LUACRUN_NoRet
-#elif __STDC_VERSION__ < 202300L
-#  define LUACRUN_NoRet _Noreturn
-#else
-#  define LUACRUN_NoRet [[noreturn]]
-#endif
-
-extern LUACRUN_NoRet int lua_error (lua_State *L);
-extern LUACRUN_NoRet int luaL_error (lua_State *L, const char *fmt, ...);
+extern int lua_error (lua_State *L);
+extern int luaL_error (lua_State *L, const char *fmt, ...);
 
 /* Build the error string, push onto stack. */
 LUA_API int
@@ -82,7 +74,7 @@ luacrun_error (lua_State *S, libcrun_error_t *err)
   return 1;
 }
 
-LUA_API LUACRUN_NoRet void
+LUA_API void
 luacrun_set_error (lua_State *S, libcrun_error_t *err)
 {
   luacrun_error (S, err);

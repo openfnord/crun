@@ -232,7 +232,7 @@ static struct argp_option options[] = { { "debug", OPTION_DEBUG, 0, 0, "produce 
                                         { "log-format", OPTION_LOG_FORMAT, "FORMAT", 0, "log format: 'text' (default) or 'json'", 0 },
                                         { "log-level", OPTION_LOG_LEVEL, "LEVEL", 0, "log level to use: 'error' (default), 'warning' or 'debug'", 0 },
                                         { "root", OPTION_ROOT, "DIR", 0, NULL, 0 },
-                                        { "rootless", OPTION_ROOT, "VALUE", 0, NULL, 0 },
+                                        { "rootless", OPTION_ROOTLESS, "VALUE", 0, NULL, 0 },
                                         { "version", OPTION_VERSION, 0, 0, NULL, 0 },
                                         // alias OPTION_VERSION_CAP with OPTION_VERSION
                                         { NULL, OPTION_VERSION_CAP, 0, OPTION_ALIAS, NULL, 0 },
@@ -247,18 +247,17 @@ print_version (FILE *stream, struct argp_state *state arg_unused)
   cleanup_free char *rundir = NULL;
   int ret;
 
-  ret = libcrun_get_state_directory (&rundir, arguments.root, NULL, &err);
-  if (UNLIKELY (ret < 0))
-    {
-      libcrun_error_release (&err);
-      fprintf (stderr, "Failed to get state directory\n");
-      exit (EXIT_FAILURE);
-    }
-
   fprintf (stream, "%s version %s\n", PACKAGE_NAME, PACKAGE_VERSION);
   fprintf (stream, "commit: %s\n", GIT_VERSION);
-  fprintf (stream, "rundir: %s\n", rundir);
+
+  ret = libcrun_get_state_directory (&rundir, arguments.root, NULL, &err);
+  if (LIKELY (ret == 0))
+    fprintf (stream, "rundir: %s\n", rundir);
+  else
+    libcrun_error_release (&err);
+
   fprintf (stream, "spec: 1.0.0\n");
+
 #ifdef HAVE_SYSTEMD
   fprintf (stream, "+SYSTEMD ");
 #endif
@@ -427,6 +426,16 @@ fill_handler_from_argv0 (char *argv0, struct crun_global_arguments *args)
     args->handler = b + 5;
 }
 
+static char **
+copy_args (char **argv, int argc)
+{
+  char **buff = xmalloc0 ((argc + 1) * sizeof (char *));
+  for (int i = 0; i < argc; i++)
+    buff[i] = argv[i];
+
+  return buff;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -444,19 +453,23 @@ main (int argc, char **argv)
     }
   /* Resolve all libcrun weak dependencies.  */
   if (dlopen ("libcrun.so", RTLD_GLOBAL | RTLD_DEEPBIND | RTLD_LAZY) == NULL)
-    error (EXIT_FAILURE, 0, "dlopen: %s", dlerror ());
+    error (EXIT_FAILURE, 0, "could not load `libcrun.so`: `%s`", dlerror ());
 #endif
 
   fill_handler_from_argv0 (argv[0], &arguments);
-
   argp_parse (&argp, argc, argv, ARGP_IN_ORDER, &first_argument, &arguments);
 
   command = get_command (argv[first_argument]);
   if (command == NULL)
     libcrun_fail_with_error (0, "unknown command %s", argv[first_argument]);
 
-  ret = command->handler (&arguments, argc - first_argument, argv + first_argument, &err);
+  int command_argc = argc - first_argument;
+  cleanup_free char **command_argv = copy_args (argv + first_argument, command_argc);
+  command_argv[0] = argv[0];
+
+  ret = command->handler (&arguments, command_argc, command_argv, &err);
   if (ret && err)
     libcrun_fail_with_error (err->status, "%s", err->msg);
+
   return ret;
 }

@@ -29,7 +29,7 @@ jobs:
           submodules: true
           set-safe-directory: true
 
-      - uses: uraimo/run-on-arch-action@v3.0.0
+      - uses: uraimo/run-on-arch-action@v3.0.1
         name: Build
         id: build
         with:
@@ -40,7 +40,7 @@ jobs:
 
           install: |
             apt-get update -y
-            apt-get install -y automake libtool autotools-dev libseccomp-dev git make libcap-dev cmake pkg-config gcc wget go-md2man libsystemd-dev gperf clang-format libyajl-dev libprotobuf-c-dev clang
+            apt-get install -y automake libtool autotools-dev libseccomp-dev git make libcap-dev cmake pkg-config gcc wget go-md2man libsystemd-dev gperf clang-format libyajl-dev libprotobuf-c-dev clang mawk
 
           run: |
             find $(pwd) -name '.git' -exec bash -c 'git config --global --add safe.directory ${0%/.git}' {} \;
@@ -94,7 +94,7 @@ jobs:
 
           sudo add-apt-repository -y ppa:criu/ppa
           # add-apt-repository runs apt-get update so we don't have to.
-          sudo apt-get install -q -y criu automake libtool autotools-dev libseccomp-dev git make libcap-dev cmake pkg-config gcc wget go-md2man libsystemd-dev gperf clang-format libyajl-dev containerd runc libasan6 libprotobuf-c-dev
+          sudo apt-get install -q -y criu automake libtool autotools-dev libseccomp-dev git make libcap-dev cmake pkg-config gcc wget go-md2man libsystemd-dev gperf clang-format libyajl-dev containerd runc libasan6 libprotobuf-c-dev mawk
 
       - name: run autogen.sh
         run: |
@@ -120,6 +120,9 @@ jobs:
                   make check ASAN_OPTIONS=detect_leaks=false || (cat test-suite.log; exit 1)
                   echo run tests as rootless in a user namespace
                   unshare -r make check ASAN_OPTIONS=detect_leaks=false || (cat test-suite.log; exit 1)
+
+                  git status
+                  git diff
 
                   # check that the working dir is clean
                   git describe --broken --dirty --all | grep -qv dirty
@@ -187,27 +190,27 @@ jobs:
           esac
 
   shellcheck:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: vars
-        run: |
-          echo 'VERSION=v0.8.0' >> $GITHUB_ENV
-          echo 'BASEURL=https://github.com/koalaman/shellcheck/releases/download' >> $GITHUB_ENV
-          echo 'SHA256SUM=f4bce23c11c3919c1b20bcb0f206f6b44c44e26f2bc95f8aa708716095fa0651' >> $GITHUB_ENV
-          echo ~/bin >> $GITHUB_PATH
       - name: install shellcheck
+        env:
+          VERSION: v0.10.0
+          BASEURL: https://github.com/koalaman/shellcheck/releases/download
+          SHA256: f35ae15a4677945428bdfe61ccc297490d89dd1e544cc06317102637638c6deb
         run: |
           mkdir ~/bin
           curl -sSfL --retry 5 $BASEURL/$VERSION/shellcheck-$VERSION.linux.x86_64.tar.xz |
             tar xfJ - -C ~/bin --strip 1 shellcheck-$VERSION/shellcheck
-          sha256sum ~/bin/shellcheck | grep -q $SHA256SUM
+          sha256sum --strict --check - <<<"$SHA256 *$HOME/bin/shellcheck"
           # make sure to remove the old version
           sudo rm -f /usr/bin/shellcheck
+          # Add ~/bin to $PATH.
+          echo ~/bin >> $GITHUB_PATH
       - name: install dependencies
         run: |
           sudo apt-get update -q -y
-          sudo apt-get install -q -y automake libtool autotools-dev libseccomp-dev git make libcap-dev cmake pkg-config gcc wget go-md2man libsystemd-dev gperf clang-format libyajl-dev libprotobuf-c-dev
+          sudo apt-get install -q -y automake libtool autotools-dev libseccomp-dev git make libcap-dev cmake pkg-config gcc wget go-md2man libsystemd-dev gperf clang-format libyajl-dev libprotobuf-c-dev mawk
       - uses: lumaxis/shellcheck-problem-matchers@v2
       - name: shellcheck
         run: |

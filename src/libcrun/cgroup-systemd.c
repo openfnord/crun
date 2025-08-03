@@ -34,6 +34,9 @@
 #include <inttypes.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <sys/vfs.h>
+#include <linux/magic.h>
 
 #ifdef HAVE_SYSTEMD
 #  include <systemd/sd-bus.h>
@@ -108,7 +111,8 @@ property_missing_p (char **missing_properties, const char *property)
 }
 
 static void
-get_systemd_scope_and_slice (const char *id, const char *cgroup_path, char **scope, char **slice)
+get_systemd_scope_and_slice (const char *id, bool user_slice, const char *cgroup_path,
+                             char **scope, char **slice)
 {
   char *n;
 
@@ -134,6 +138,16 @@ get_systemd_scope_and_slice (const char *id, const char *cgroup_path, char **sco
       n = strchr (*slice, ':');
       if (n)
         *n = '\0';
+
+      /* Ref: https://github.com/opencontainers/runc/blob/main/docs/systemd.md#systemd-unit-name-and-placement */
+      if (is_empty_string (*slice))
+        {
+          free (*slice);
+          if (user_slice)
+            *slice = xstrdup ("user.slice");
+          else
+            *slice = xstrdup ("system.slice");
+        }
     }
 }
 
@@ -146,7 +160,7 @@ setup_rt_runtime (runtime_spec_schema_config_linux_resources *resources,
   cleanup_close int dirfd = -1;
   bool need_set_parent = true;
   char fmt_buf[64];
-  size_t len;
+  int len;
   int ret;
 
   if (resources == NULL || resources->cpu == NULL)
@@ -169,7 +183,9 @@ setup_rt_runtime (runtime_spec_schema_config_linux_resources *resources,
 
   if (resources->cpu->realtime_period)
     {
-      len = sprintf (fmt_buf, "%" PRIu64, resources->cpu->realtime_period);
+      len = snprintf (fmt_buf, sizeof (fmt_buf), "%" PRIu64, resources->cpu->realtime_period);
+      if (UNLIKELY (len >= (int) sizeof (fmt_buf)))
+        return crun_make_error (err, 0, "internal error: static buffer too small");
 
       if (need_set_parent)
         {
@@ -185,7 +201,9 @@ setup_rt_runtime (runtime_spec_schema_config_linux_resources *resources,
 
   if (resources->cpu->realtime_runtime)
     {
-      len = sprintf (fmt_buf, "%" PRIu64, resources->cpu->realtime_runtime);
+      len = snprintf (fmt_buf, sizeof (fmt_buf), "%" PRIu64, resources->cpu->realtime_runtime);
+      if (UNLIKELY (len >= (int) sizeof (fmt_buf)))
+        return crun_make_error (err, 0, "internal error: static buffer too small");
 
       if (need_set_parent)
         {
@@ -958,10 +976,14 @@ append_io_weight (sd_bus_message *m, char **missing_properties, runtime_spec_sch
   for (i = 0; resources->block_io && i < resources->block_io->weight_device_len; i++)
     {
       char name[64];
+      int len;
 
-      snprintf (name, sizeof (name), "%" PRIu64 ":%" PRIu64,
-                resources->block_io->weight_device[i]->major,
-                resources->block_io->weight_device[i]->minor);
+      len = snprintf (name, sizeof (name), "%" PRIu64 ":%" PRIu64,
+                      resources->block_io->weight_device[i]->major,
+                      resources->block_io->weight_device[i]->minor);
+      if (UNLIKELY (len >= (int) sizeof (name)))
+        return crun_make_error (err, 0, "internal error: static buffer too small");
+
       weight = IO_WEIGHT (resources->block_io->weight_device[i]->weight);
       APPEND_IO_DEVICE_WEIGHT (name, weight);
     }
@@ -1087,6 +1109,7 @@ append_device_allow (sd_bus_message *m,
 {
   char device[64];
   int sd_err;
+  int len;
 
   if (IS_WILDCARD (major) && ! IS_WILDCARD (minor))
     {
@@ -1095,11 +1118,14 @@ append_device_allow (sd_bus_message *m,
     }
 
   if (IS_WILDCARD (major) && IS_WILDCARD (minor))
-    snprintf (device, sizeof (device) - 1, "%s-*", type == 'c' ? "char" : "block");
+    len = snprintf (device, sizeof (device), "%s-*", type == 'c' ? "char" : "block");
   else if (IS_WILDCARD (minor))
-    snprintf (device, sizeof (device) - 1, type == 'c' ? "char-%d" : "block-%d", major);
+    len = snprintf (device, sizeof (device), type == 'c' ? "char-%d" : "block-%d", major);
   else
-    snprintf (device, sizeof (device) - 1, "/dev/%s/%d:%d", type == 'c' ? "char" : "block", major, minor);
+    len = snprintf (device, sizeof (device), "/dev/%s/%d:%d", type == 'c' ? "char" : "block", major, minor);
+
+  if (UNLIKELY (len >= (int) sizeof (device)))
+    return crun_make_error (err, 0, "internal error: static buffer too small");
 
   sd_err = sd_bus_message_append (m, "(sv)", "DeviceAllow", "a(ss)", 1, device, access);
   if (UNLIKELY (sd_err < 0))
@@ -1344,12 +1370,116 @@ append_devices (sd_bus_message *m,
   return 0;
 }
 
+static bool
+has_bpf_fs ()
+{
+  struct statfs stat;
+
+  return statfs (SYS_FS_BPF, &stat) == 0 && (stat.f_type == BPF_FS_MAGIC);
+}
+
+static int
+bpfprog_path_from_scope (char **path, const char *scope, libcrun_error_t *err)
+{
+  cleanup_free char *flat_scope = xstrdup (scope);
+  char *it;
+
+  /* Remove dots as EBPF code don't like them.  */
+  it = flat_scope;
+  while ((it = strchr (it, '.')) != NULL)
+    *it = '_';
+
+  return append_paths (path, err, CRUN_BPF_DIR, flat_scope, NULL);
+}
+
+static int
+add_bpf_program (sd_bus_message *m,
+                 bool is_update,
+                 runtime_spec_schema_config_linux_resources *resources,
+                 char **missing_properties,
+                 const char *scope,
+                 bool *devices_set,
+                 libcrun_error_t *err)
+{
+  int ret = 0;
+  int in_userns, sd_err;
+  const char *property_name = "BPFProgram";
+  cleanup_free struct bpf_program *program = NULL;
+  cleanup_free char *path = NULL;
+
+  *devices_set = false;
+
+  /* Only root in the initial user namespace can pin a bpf program. */
+  if (getuid () != 0 || ! has_bpf_fs () || property_missing_p (missing_properties, property_name))
+    return 0;
+
+  in_userns = check_running_in_user_namespace (err);
+  if (UNLIKELY (in_userns < 0))
+    return in_userns;
+
+  if (in_userns)
+    return 0;
+
+  program = create_dev_bpf (resources->devices, resources->devices_len, err);
+  if (UNLIKELY (program == NULL))
+    {
+      crun_error_release (err);
+      return 0;
+    }
+
+  ret = bpfprog_path_from_scope (&path, scope, err);
+  if (UNLIKELY (ret < 0))
+    return ret;
+
+  if (is_update)
+    {
+      cleanup_free struct bpf_program *program_loaded = NULL;
+
+      if (resources->devices == NULL || resources->devices_len == 0)
+        {
+          *devices_set = true;
+          return 0;
+        }
+
+      ret = libcrun_ebpf_read_program (&program_loaded, path, err);
+      if (UNLIKELY (ret < 0))
+        return ret;
+
+      /* it is the same as the loaded program.  */
+      if (libcrun_ebpf_cmp_programs (program, program_loaded))
+        {
+          *devices_set = true;
+          return 0;
+        }
+
+      return crun_make_error (err, 0, "updating device access list not supported when using BPFProgram");
+    }
+
+  ret = mkdir (CRUN_BPF_DIR, 0700);
+  if (UNLIKELY (ret < 0 && errno != EEXIST))
+    return crun_make_error (err, errno, "mkdir " CRUN_BPF_DIR);
+
+  ret = libcrun_ebpf_load (program, -1, path, err);
+  if (UNLIKELY (ret < 0))
+    return ret;
+
+  sd_err = sd_bus_message_append (m, "(sv)", property_name, "a(ss)", 1, "device", path);
+  if (UNLIKELY (sd_err < 0))
+    return crun_make_error (err, -sd_err, "sd-bus message append BPFProgram");
+
+  *devices_set = true;
+
+  return 0;
+}
+
 static int
 append_resources (sd_bus_message *m,
                   bool is_update,
                   const char *state_dir,
                   runtime_spec_schema_config_linux_resources *resources,
                   int cgroup_mode,
+                  const char *scope,
+                  bool *devices_set,
                   libcrun_error_t *err)
 {
   uint64_t value;
@@ -1357,6 +1487,8 @@ append_resources (sd_bus_message *m,
   int ret;
   cleanup_free char *dir = NULL;
   cleanup_free char **missing_properties = NULL;
+
+  *devices_set = false;
 
   ret = append_paths (&dir, err, state_dir, SYSTEMD_MISSING_PROPERTIES_DIR, NULL);
   if (UNLIKELY (ret < 0))
@@ -1406,7 +1538,7 @@ append_resources (sd_bus_message *m,
   if (resources->cpu)
     {
       /* do not bother with systemd internal representation unless both values are specified */
-      if (resources->cpu->quota && resources->cpu->period)
+      if (resources->cpu->quota > 0 && resources->cpu->period)
         {
           uint64_t quota = resources->cpu->quota;
 
@@ -1475,6 +1607,10 @@ append_resources (sd_bus_message *m,
                   return ret;
               }
           }
+
+        ret = add_bpf_program (m, is_update, resources, missing_properties, scope, devices_set, err);
+        if (UNLIKELY (ret < 0))
+          return ret;
       }
       break;
 
@@ -1491,7 +1627,7 @@ append_resources (sd_bus_message *m,
 #  undef APPEND_UINT64
 #  undef APPEND_UINT64_VALUE
 
-  if (! is_update || resources->devices)
+  if (! *devices_set && (! is_update || resources->devices))
     {
       ret = append_devices (m, resources, err);
       if (UNLIKELY (ret < 0))
@@ -1540,6 +1676,7 @@ enter_systemd_cgroup_scope (runtime_spec_schema_config_linux_resources *resource
                             const char *scope, const char *slice,
                             pid_t pid,
                             bool *can_retry,
+                            bool *devices_set,
                             libcrun_error_t *err)
 {
   sd_bus *bus = NULL;
@@ -1554,6 +1691,7 @@ enter_systemd_cgroup_scope (runtime_spec_schema_config_linux_resources *resource
   cleanup_free char *state_dir = NULL;
 
   *can_retry = false;
+  *devices_set = false;
 
   ret = libcrun_get_state_directory (&state_dir, state_root, NULL, err);
   if (UNLIKELY (ret < 0))
@@ -1681,7 +1819,7 @@ enter_systemd_cgroup_scope (runtime_spec_schema_config_linux_resources *resource
         }
     }
 
-  ret = append_resources (m, false, state_dir, resources, cgroup_mode, err);
+  ret = append_resources (m, false, state_dir, resources, cgroup_mode, scope, devices_set, err);
   if (UNLIKELY (ret < 0))
     goto exit;
 
@@ -1845,20 +1983,28 @@ libcrun_cgroup_enter_systemd (struct libcrun_cgroup_args *args,
   const char *id = args->id;
   pid_t pid = args->pid;
   int cgroup_mode;
+  int rootless = 0;
   int ret;
 
   cgroup_mode = libcrun_get_cgroup_mode (err);
   if (UNLIKELY (cgroup_mode < 0))
     return cgroup_mode;
 
-  get_systemd_scope_and_slice (id, cgroup_path, &scope, &slice);
+  if (cgroup_mode == CGROUP_MODE_UNIFIED)
+    {
+      rootless = is_rootless (err);
+      if (UNLIKELY (rootless < 0))
+        return rootless;
+    }
+
+  get_systemd_scope_and_slice (id, rootless == 1, cgroup_path, &scope, &slice);
 
   for (;;)
     {
       bool can_retry = false;
 
       ret = enter_systemd_cgroup_scope (resources, cgroup_mode, args->annotations, args->state_root,
-                                        scope, slice, pid, &can_retry, err);
+                                        scope, slice, pid, &can_retry, &out->bpf_dev_set, err);
       if (LIKELY (ret >= 0))
         break;
 
@@ -1918,6 +2064,7 @@ libcrun_destroy_cgroup_systemd (struct libcrun_cgroup_status *cgroup_status,
                                 libcrun_error_t *err)
 {
   cleanup_free char *path_to_scope = NULL;
+  cleanup_free char *bpfprog = NULL;
   int mode;
   int ret;
 
@@ -1932,6 +2079,12 @@ libcrun_destroy_cgroup_systemd (struct libcrun_cgroup_status *cgroup_status,
   ret = libcrun_destroy_systemd_cgroup_scope (cgroup_status, err);
   if (UNLIKELY (ret < 0))
     crun_error_release (err);
+
+  ret = bpfprog_path_from_scope (&bpfprog, cgroup_status->scope, err);
+  if (UNLIKELY (ret < 0))
+    crun_error_release (err);
+  else
+    unlink (bpfprog); // Best effort.
 
   path_to_scope = get_cgroup_scope_path (cgroup_status->path, cgroup_status->scope);
 
@@ -1993,7 +2146,7 @@ libcrun_update_resources_systemd (struct libcrun_cgroup_status *cgroup_status,
       goto exit;
     }
 
-  ret = append_resources (m, true, state_dir, resources, cgroup_mode, err);
+  ret = append_resources (m, true, state_dir, resources, cgroup_mode, cgroup_status->scope, &cgroup_status->bpf_dev_set, err);
   if (UNLIKELY (ret < 0))
     goto exit;
 

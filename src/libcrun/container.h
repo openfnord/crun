@@ -139,6 +139,11 @@ struct intel_rdt_s
   bool enabled;
 };
 
+struct net_devices_s
+{
+  bool enabled;
+};
+
 struct mount_ext_info_s
 {
   struct idmap_info_s idmap;
@@ -154,6 +159,7 @@ struct linux_info_s
   struct selinux_info_s selinux;
   struct mount_ext_info_s mount_ext;
   struct intel_rdt_s intel_rdt;
+  struct net_devices_s net_devices;
 };
 
 struct annotations_info_s
@@ -182,6 +188,7 @@ struct libcrun_checkpoint_restore_s
   char *work_path;
   bool leave_running;
   bool tcp_established;
+  bool tcp_close;
   bool shell_job;
   bool ext_unix_sk;
   bool detach;
@@ -271,6 +278,7 @@ struct libcrun_intel_rdt_update
 {
   const char *l3_cache_schema;
   const char *mem_bw_schema;
+  char *const *schemata;
 };
 
 LIBCRUN_PUBLIC int libcrun_container_update_intel_rdt (libcrun_context_t *context, const char *id,

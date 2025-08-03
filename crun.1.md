@@ -571,6 +571,16 @@ destination instead of attempting a mount that would resolve the
 symlink itself.  If the destination already exists and it is not a
 symlink with the expected content, crun will return an error.
 
+## dest-nofollow
+When this option is specified for a bind mount, and the destination of
+the bind mount is a symbolic link, `crun` will mount the symbolic link
+itself at the target destination.
+
+## src-nofollow
+When this option is specified for a bind mount, and the source of the
+bind mount is a symbolic link, `crun` will use the symlink itself
+rather than the file or directory the symbolic link points to.
+
 ## r$FLAG mount options
 
 If a `r$FLAG` mount option is specified then the flag `$FLAG` is set
@@ -702,11 +712,11 @@ they are converted when needed from the cgroup v1 configuration.
 
 ## CPU controller
 
-| OCI (x) | cgroup 2 value (y) | conversion  |  comment |
-|---|---|---|---|
-| shares | cpu.weight | y = (1 + ((x - 2) * 9999) / 262142) | convert from [2-262144] to [1-10000]|
-| period | cpu.max | y = x| period and quota are written together|
-| quota | cpu.max | y = x| period and quota are written together|
+| OCI (x) | cgroup 2 value (y) | conversion                                              | comment                               |
+|---------|--------------------|---------------------------------------------------------|---------------------------------------|
+| shares  | cpu.weight         | y=10^((log2(x)^2 + 125 * log2(x)) / 612.0 - 7.0 / 34.0) | convert from [2-262144] to [1-10000]  |
+| period  | cpu.max            | y = x                                                   | period and quota are written together |
+| quota   | cpu.max            | y = x                                                   | period and quota are written together |
 
 ## blkio controller
 

@@ -42,17 +42,24 @@ def helper_mount(options, tmpfs=True, userns=False, is_file=False):
     else:
         mount_opt = {"destination": "/var/dir", "type": "bind", "source": get_tests_root(), "options": ["bind", "rprivate"] + [options]}
     conf['mounts'].append(mount_opt)
-    out, _ = run_and_get_output(conf, hide_stderr=True)
-    with tempfile.NamedTemporaryFile(mode='w', delete=True) as f:
-        f.write(out)
-        f.flush()
-        t = libmount.Table(f.name)
-        if is_file:
-            m = t.find_target('/var/file')
-        else:
-            m = t.find_target('/var/dir')
-        return [m.vfs_options, m.fs_options]
-    return -1
+    try:
+        out, _ = run_and_get_output(conf, hide_stderr=True)
+        with tempfile.NamedTemporaryFile(mode='w', delete=True) as f:
+            f.write(out)
+            f.flush()
+            t = libmount.Table(f.name)
+            target = '/var/file' if is_file else '/var/dir'
+            m = t.find_target(target)
+            if m is None:
+                sys.stderr.write("# helper_mount failed: mount target '%s' not found in mountinfo\n" % target)
+                sys.stderr.write("# mount options: %s, tmpfs=%s, userns=%s, is_file=%s\n" % (options, tmpfs, userns, is_file))
+                sys.stderr.write("# mountinfo output: %s\n" % out[:300])
+                return -1
+            return [m.vfs_options, m.fs_options]
+    except Exception as e:
+        sys.stderr.write("# helper_mount failed with exception: %s\n" % str(e))
+        sys.stderr.write("# mount options: %s, tmpfs=%s, userns=%s, is_file=%s\n" % (options, tmpfs, userns, is_file))
+        return -1
 
 def test_mount_symlink():
     conf = base_config()
@@ -63,6 +70,8 @@ def test_mount_symlink():
     out, _ = run_and_get_output(conf, hide_stderr=True)
     if "Rome" in out:
         return 0
+    sys.stderr.write("# symlink mount test failed: expected 'Rome' in mountinfo output\n")
+    sys.stderr.write("# actual output: %s\n" % out[:200])
     return -1
 
 def test_mount_fifo():
@@ -79,6 +88,8 @@ def test_mount_fifo():
         conf['mounts'].append(mount_opt)
         out, _ = run_and_get_output(conf, hide_stderr=True)
         if "FIFO" not in out:
+            sys.stderr.write("# FIFO mount test failed with options %s: expected 'FIFO' in output\n" % options)
+            sys.stderr.write("# actual output: %s\n" % out)
             return 1
     return 0
 
@@ -97,6 +108,8 @@ def test_mount_unix_socket():
         conf['mounts'].append(mount_opt)
         out, _ = run_and_get_output(conf, hide_stderr=True)
         if "socket" not in out:
+            sys.stderr.write("# unix socket mount test failed with options %s: expected 'socket' in output\n" % options)
+            sys.stderr.write("# actual output: %s\n" % out)
             return 1
     return 0
 
@@ -109,11 +122,40 @@ def test_mount_tmpfs_permissions():
     conf = base_config()
     conf['process']['args'] = ['/init', 'mode', '/tmp']
     add_all_namespaces(conf)
-    mount_opt = {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["bind", "ro"]}
+    conf['mounts'].append({"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["ro"]})
     out, _ = run_and_get_output(conf, hide_stderr=True, callback_prepare_rootfs=prepare_rootfs)
     if "712" in out:
         return 0
+    sys.stderr.write("# tmpfs permissions test failed: expected '712' in mode output\n")
+    sys.stderr.write("# actual output: %s\n" % out)
     return -1
+
+def test_mount_bind_to_rootfs():
+    conf = base_config()
+    conf['process']['args'] = ['/init', 'true']
+    add_all_namespaces(conf)
+    tmpdir = tempfile.mkdtemp()
+    shutil.copy(get_init_path(), tmpdir)
+
+    mounts = [
+        {"destination": "/", "type": "bind", "source": tmpdir, "options": ["bind"]},
+    ]
+    conf['mounts'] = mounts + conf['mounts']
+    _, _ = run_and_get_output(conf, hide_stderr=True)
+    return 0
+
+def test_mount_tmpfs_to_rootfs():
+    conf = base_config()
+    conf['process']['args'] = ['/init', 'true']
+    add_all_namespaces(conf)
+    tmpdir = tempfile.mkdtemp()
+
+    mounts = [
+        {"destination": "/", "type": "tmpfs", "source": "tmpfs", "options": ["tmpcopyup"]},
+    ]
+    conf['mounts'] = mounts + conf['mounts']
+    _, _ = run_and_get_output(conf, hide_stderr=True)
+    return 0
 
 def test_ro_cgroup():
     for cgroupns in [True, False]:
@@ -443,7 +485,7 @@ def test_userns_bind_mount_symlink():
     ]
     conf['linux']['uidMappings'] = fullMapping
     conf['linux']['gidMappings'] = fullMapping
-    sys.stderr.write("start")
+    sys.stderr.write("# start\n")
 
     bind_dir_parent = os.path.join(get_tests_root(), "bind-mount-userns-symlink")
     bind_dir = os.path.join(bind_dir_parent, "m")
@@ -461,7 +503,7 @@ def test_userns_bind_mount_symlink():
         conf['process']['args'] = ['/init', 'cat', "/foo/content"]
         out, _ = run_and_get_output(conf, chown_rootfs_to=1)
         if out != "hello":
-            sys.stderr.write("wrong file owner, found %s instead of %s" % (out, "hello"))
+            sys.stderr.write("# wrong file owner, found %s instead of %s\n" % (out, "hello"))
             return -1
     finally:
         shutil.rmtree(bind_dir)
@@ -514,7 +556,7 @@ def test_idmapped_mounts():
             conf['mounts'].append(mount_opt)
             out = run_and_get_output(conf, chown_rootfs_to=1)
             if expected not in out[0]:
-                sys.stderr.write("wrong file owner, found %s instead of %s" % (out[0], expected))
+                sys.stderr.write("# wrong file owner, found %s instead of %s\n" % (out[0], expected))
                 return True
             return False
 
@@ -591,14 +633,14 @@ def test_cgroup_mount_without_netns():
         conf['mounts'] = mounts
 
         out, _ = run_and_get_output(conf)
-        print(out)
+        # print(out)
         # validate there are two mounts
         count = 0
         for i in out.split("\n"):
             if i.find("/sys/fs/cgroup") >= 0:
                 count = count + 1
         if count < 2:
-            print("fail with cgroupns=%s, got %s" % (cgroupns, out))
+            sys.stderr.write("# fail with cgroupns=%s, got %s\n" % (cgroupns, out))
             return -1
     return 0
 
@@ -629,9 +671,9 @@ def test_add_remove_mounts():
         if exists == expected:
             return True
         if expected:
-            sys.stderr.write("test file not found")
+            sys.stderr.write("# test file not found\n")
         else:
-            sys.stderr.write("test file found")
+            sys.stderr.write("# test file found\n")
         return False
 
     new_mounts = [{"destination": parent_dir_in_container, "type": "bind", "source": bind_dir, "options": ["bind", "ro"]},
@@ -652,7 +694,7 @@ def test_add_remove_mounts():
             return -1
         out = run_crun_command(["exec", cid, "/init", "cat", "/proc/self/mountinfo"])
         if not re.search(r".*/ /foo/tmpfs .*tmpfs.*", out):
-            sys.stderr.write("/foo/tmpfs not found as a tmpfs\n")
+            sys.stderr.write("# /foo/tmpfs not found as a tmpfs\n")
             return -1
 
         run_crun_command(["mounts", "remove", cid, mounts_path])
@@ -661,12 +703,183 @@ def test_add_remove_mounts():
 
         out = run_crun_command(["exec", cid, "/init", "cat", "/proc/self/mountinfo"])
         if re.search(r".*/ /foo/tmpfs .*tmpfs.*", out):
-            sys.stderr.write("/foo/tmpfs still mounted\n")
+            sys.stderr.write("# /foo/tmpfs still mounted\n")
             return -1
     finally:
         if cid is not None:
             run_crun_command(["delete", "-f", cid])
         shutil.rmtree(bind_dir)
+    return 0
+
+def test_mount_help():
+    out = run_crun_command(["mounts", "--help"])
+    if "Usage: crun [OPTION...] mounts [add|remove] CONTAINER FILE" not in out:
+        return -1
+
+    return 0
+
+def test_bind_mount_symlink_nofollow():
+    root = get_tests_root()
+    file_target = os.path.join(root, "a-file")
+    symlink = os.path.join(root, "a-symlink")
+    target_content = file_target
+    file_target_content = "inside-the-file"
+
+    with open(file_target, "w+") as f:
+        f.write(file_target_content)
+
+    os.symlink(target_content, symlink)
+
+    def prepare_rootfs(rootfs):
+        path = os.path.join(rootfs, "target")
+        os.symlink("point-to-nowhere", path)
+
+    for userns in [True, False]:
+        for src_nofollow in [True, False]:
+            conf = base_config()
+            add_all_namespaces(conf, userns=userns)
+
+            if userns:
+                getMapping = lambda x : [
+                    {
+                        "containerID": 0,
+                        "hostID": x,
+                        "size": 1
+                    }
+                ]
+                conf['linux']['uidMappings'] = getMapping(os.geteuid())
+                conf['linux']['gidMappings'] = getMapping(os.getegid())
+
+            if src_nofollow:
+                options = ["bind", "dest-nofollow", "src-nofollow"]
+                conf['process']['args'] = ['/init', 'readlink', '/target']
+                expected = target_content
+            else:
+                options = ["bind", "dest-nofollow"]
+                conf['process']['args'] = ['/init', 'cat', '/target']
+                expected = file_target_content
+
+            mount_opt = {"destination": "/target", "type": "bind", "source": symlink, "options": options}
+            conf['mounts'].append(mount_opt)
+
+            try:
+                out, _ = run_and_get_output(conf, hide_stderr=True,callback_prepare_rootfs=prepare_rootfs)
+                sys.stderr.write("# got output %s with configuration userns=%s, src-nofollow=%s\n" % (out, userns, src_nofollow))
+                if expected not in out:
+                    return -1
+            except Exception as e:
+                sys.stderr.write("# error %s\n" % e)
+                return -1
+
+    return 0
+
+def test_bind_mount_symlink_nofollow_procfs():
+    root = get_tests_root()
+    symlink = os.path.join(root, "a-symlink")
+    os.symlink("does not matter", symlink)
+
+    conf = base_config()
+    add_all_namespaces(conf)
+
+    options = ["bind", "dest-nofollow", "src-nofollow"]
+    conf['process']['args'] = ['/init', 'readlink', '/proc/self']
+
+    mount_opt = {"destination": "/proc/self", "type": "bind", "source": symlink, "options": options}
+    conf['mounts'].append(mount_opt)
+
+    try:
+        out, _ = run_and_get_output(conf, hide_stderr=True,callback_prepare_rootfs=prepare_rootfs)
+        return -1
+    except Exception as e:
+        sys.stderr.write("# error %s\n" % e)
+        return 0
+
+    return 0
+
+def test_bind_mount_file_nofollow():
+    root = get_tests_root()
+    target = os.path.join(root, "a-file")
+    target_content = "content-of-file"
+
+    with open(target, "w+") as f:
+        f.write(target_content)
+
+    def prepare_rootfs(rootfs):
+        path = os.path.join(rootfs, "symlink")
+        os.symlink("point-to-nowhere", path)
+
+    for userns in [True, False]:
+        for src_nofollow in [True, False]:
+            conf = base_config()
+            conf['process']['args'] = ['/init', 'cat', '/symlink']
+            add_all_namespaces(conf, userns=userns)
+
+            if userns:
+                getMapping = lambda x : [
+                    {
+                        "containerID": 0,
+                        "hostID": x,
+                        "size": 1
+                    }
+                ]
+                conf['linux']['uidMappings'] = getMapping(os.geteuid())
+                conf['linux']['gidMappings'] = getMapping(os.getegid())
+
+            if src_nofollow:
+                options = ["bind", "dest-nofollow", "src-nofollow"]
+            else:
+                options = ["bind", "dest-nofollow"]
+            mount_opt = {"destination": "/symlink", "type": "bind", "source": target, "options": options}
+            conf['mounts'].append(mount_opt)
+
+            try:
+                out, _ = run_and_get_output(conf, hide_stderr=True,callback_prepare_rootfs=prepare_rootfs)
+                sys.stderr.write("# got output %s with configuration userns=%s, src-nofollow=%s\n" % (out, userns, src_nofollow))
+                if target_content not in out:
+                    return 1
+            except Exception as e:
+                sys.stderr.write("# error %s\n" % e)
+    return 0
+
+def test_idmapped_mounts_without_userns():
+    if is_rootless():
+        return 77
+    source_dir = os.path.join(get_tests_root(), "test-idmapped-mounts-no-userns")
+    try:
+        os.makedirs(source_dir)
+        target = os.path.join(source_dir, "file")
+
+        with open(target, "w+") as f:
+            f.write("")
+        os.chown(target, 0, 0)
+
+        conf = base_config()
+        add_all_namespaces(conf, userns=False)
+        conf['process']['args'] = ['/init', 'owner', '/foo/file']
+
+        mountMappings = [
+            {
+                "containerID": 0,
+                "hostID": 1000,
+                "size": 10
+            }
+        ]
+
+        options = ["bind", "ro", "idmap"]
+        mount_opt = {"destination": "/foo", "type": "bind", "source": source_dir, "options": options}
+        mount_opt["uidMappings"] = mountMappings
+        mount_opt["gidMappings"] = mountMappings
+
+        conf['mounts'].append(mount_opt)
+        out, _ = run_and_get_output(conf, hide_stderr=True)
+
+        if "1000:1000" not in out:
+            sys.stderr.write("# idmap without userns test failed: expected '1000:1000' in output\n")
+            sys.stderr.write("# actual output: %s\n" % out)
+            return 1
+    finally:
+        shutil.rmtree(source_dir)
+
     return 0
 
 all_tests = {
@@ -686,18 +899,25 @@ all_tests = {
     "mount-unix-socket" : test_mount_unix_socket,
     "mount-symlink-not-existing" : test_mount_symlink_not_existing,
     "mount-dev" : test_mount_dev,
+    "mount-bind-to-rootfs": test_mount_bind_to_rootfs,
+    "mount-tmpfs-to-rootfs": test_mount_tmpfs_to_rootfs,
     "mount-nodev" : test_mount_nodev,
     "mount-path-with-multiple-slashes" : test_mount_path_with_multiple_slashes,
     "mount-userns-bind-mount" : test_userns_bind_mount,
     "mount-idmapped-mounts" : test_idmapped_mounts,
+    "mount-idmapped-mounts-without-userns" : test_idmapped_mounts_without_userns,
     "mount-idmapped-mounts-symlink" : test_userns_bind_mount_symlink,
     "mount-linux-readonly-should-inherit-flags": test_mount_readonly_should_inherit_options_from_parent,
     "proc-linux-readonly-should-inherit-flags": test_proc_readonly_should_inherit_options_from_parent,
     "mount-ro-cgroup": test_ro_cgroup,
     "mount-cgroup-without-netns": test_cgroup_mount_without_netns,
     "mount-copy-symlink": test_copy_symlink,
+    "mount-bind-mount-symlink-nofollow-procfs": test_bind_mount_symlink_nofollow_procfs,
+    "mount-bind-mount-symlink-nofollow": test_bind_mount_symlink_nofollow,
+    "mount-bind-mount-file-nofollow": test_bind_mount_file_nofollow,
     "mount-tmpfs-permissions": test_mount_tmpfs_permissions,
     "mount-add-remove-mounts": test_add_remove_mounts,
+    "mount-help": test_mount_help,
 }
 
 if __name__ == "__main__":

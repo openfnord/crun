@@ -19,6 +19,7 @@ import time
 import subprocess
 import os
 import os.path
+import random
 import threading
 import socket
 import json
@@ -35,7 +36,7 @@ def test_not_allowed_ipc_sysctl():
     cid = None
     try:
         _, cid = run_and_get_output(conf)
-        sys.stderr.write("unexpected success\n")
+        sys.stderr.write("# unexpected success\n")
         return -1
     except:
         pass
@@ -50,7 +51,7 @@ def test_not_allowed_ipc_sysctl():
     cid = None
     try:
         _, cid = run_and_get_output(conf)
-        sys.stderr.write("unexpected success\n")
+        sys.stderr.write("# unexpected success\n")
         return -1
     except:
         pass
@@ -66,7 +67,7 @@ def test_not_allowed_ipc_sysctl():
     try:
         _, cid = run_and_get_output(conf)
     except Exception as e:
-        sys.stderr.write("setting msgmax with new ipc namespace failed\n")
+        sys.stderr.write("# setting msgmax with new ipc namespace failed\n")
         return -1
     finally:
         if cid is not None:
@@ -83,7 +84,7 @@ def test_not_allowed_net_sysctl():
     cid = None
     try:
         _, cid = run_and_get_output(conf)
-        sys.stderr.write("unexpected success\n")
+        sys.stderr.write("# unexpected success\n")
         return -1
     except:
         pass
@@ -99,7 +100,7 @@ def test_not_allowed_net_sysctl():
     try:
         _, cid = run_and_get_output(conf)
     except Exception as e:
-        sys.stderr.write("setting net.ipv4.ping_group_range with new net namespace failed\n")
+        sys.stderr.write("# setting net.ipv4.ping_group_range with new net namespace failed\n")
         return -1
     finally:
         if cid is not None:
@@ -119,7 +120,7 @@ def test_unknown_sysctl():
         cid = None
         try:
             _, cid = run_and_get_output(conf)
-            sys.stderr.write("unexpected success\n")
+            sys.stderr.write("# unexpected success\n")
             return -1
         except:
             return 0
@@ -141,7 +142,7 @@ def test_uts_sysctl():
         cid = None
         try:
             _, cid = run_and_get_output(conf)
-            sys.stderr.write("unexpected success\n")
+            sys.stderr.write("# unexpected success\n")
             return -1
         except:
             return 0
@@ -156,7 +157,7 @@ def test_uts_sysctl():
     cid = None
     try:
         _, cid = run_and_get_output(conf)
-        sys.stderr.write("unexpected success\n")
+        sys.stderr.write("# unexpected success\n")
         return -1
     except:
         return 0
@@ -460,21 +461,21 @@ def test_run_keep():
     try:
         out, cid = run_and_get_output(conf, command='run')
     except:
-        sys.stderr.write("failed to create container\n")
+        sys.stderr.write("# failed to create container\n")
         return -1
 
     # without --keep, we must be able to recreate the container with the same id
     try:
         out, cid = run_and_get_output(conf, command='run', keep=True, id_container=cid)
     except:
-        sys.stderr.write("failed to create container\n")
+        sys.stderr.write("# failed to create container\n")
         return -1
 
     # now it must fail
     try:
         try:
             out, cid = run_and_get_output(conf, command='run', keep=True, id_container=cid)
-            sys.stderr.write("run --keep succeeded twice\n")
+            sys.stderr.write("# run --keep succeeded twice\n")
             return -1
         except:
             # expected
@@ -483,7 +484,7 @@ def test_run_keep():
         try:
             s = run_crun_command(["state", cid])
         except:
-            sys.stderr.write("crun state failed on --keep container\n")
+            sys.stderr.write("# crun state failed on --keep container\n")
             return -1
     finally:
         run_crun_command(["delete", "-f", cid])
@@ -502,7 +503,7 @@ def test_invalid_id():
         err = e.output.decode()
         if "invalid character `/` in the ID" in err:
             return 0
-        sys.stderr.write("Got error: %s\n" % err)
+        sys.stderr.write("# got error: %s\n" % err)
         return -1
     return 0
 
@@ -517,8 +518,53 @@ def test_home_unknown_id():
     add_all_namespaces(conf)
     out, _ = run_and_get_output(conf)
     if out != "/":
-        sys.stderr.write("expected: `/`, got output: `%s`\n" % out)
+        sys.stderr.write("# expected: `/`, got output: `%s`\n" % out)
         return -1
+    return 0
+
+def test_start_help():
+    out = run_crun_command(["start", "--help"])
+    if "Usage: crun [OPTION...] start CONTAINER" not in out:
+        return -1
+    
+    return 0
+
+# https://github.com/containers/crun/issues/1811.
+def test_systemd_cgroups_path_def_slice():
+    if 'SYSTEMD' not in get_crun_feature_string():
+        return 77
+    if not running_on_systemd():
+        return 77
+
+    conf = base_config()
+    add_all_namespaces(conf)
+    conf['process']['args'] = ['/init', 'pause']
+    conf['linux']['cgroupsPath'] = ':crun:%d' % random.randint(10000, 99999) # crun-NNNNN.scope
+
+    cid = None
+    try:
+        _, cid = run_and_get_output(conf, cgroup_manager="systemd", detach=True)
+        state = run_crun_command(['state', cid])
+        scope = json.loads(state)['systemd-scope']
+
+        want='system.slice'
+        if is_rootless():
+            want='user.slice'
+
+        got = subprocess.check_output(['systemctl', 'show','-PSlice', scope], close_fds=False).decode().strip()
+        # try once more against the user manager, as if one exists, crun will prefer it; see bug #1197
+        if got != want:
+            got = subprocess.check_output(['systemctl', '--user', 'show','-PSlice', scope], close_fds=False).decode().strip()
+
+        if got != want:
+            sys.stderr.write("# Got Slice %s, want %s\n" % got, want)
+            return 1
+    except:
+        return 1
+    finally:
+        if cid is not None:
+            run_crun_command(["delete", "-f", cid])
+
     return 0
 
 all_tests = {
@@ -541,6 +587,8 @@ all_tests = {
     "run-keep": test_run_keep,
     "invalid-id": test_invalid_id,
     "home-unknown-id": test_home_unknown_id,
+    "help": test_start_help,
+    "systemd-cgroups-path-def-slice": test_systemd_cgroups_path_def_slice,
 }
 
 if __name__ == "__main__":

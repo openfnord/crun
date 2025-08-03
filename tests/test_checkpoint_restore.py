@@ -85,6 +85,7 @@ def _get_cmdline(cid, tests_root):
 def run_cr_test(conf):
     cid = None
     cr_dir = os.path.join(get_tests_root(), 'checkpoint')
+    work_dir = 'work-dir'
     try:
         _, cid = run_and_get_output(
             conf,
@@ -97,7 +98,12 @@ def run_cr_test(conf):
         if first_cmdline == "":
             return -1
 
-        run_crun_command(["checkpoint", "--image-path=%s" % cr_dir, cid])
+        run_crun_command([
+            "checkpoint",
+            "--image-path=%s" % cr_dir,
+            "--work-path=%s" % work_dir,
+            cid
+        ])
 
         bundle = os.path.join(
             get_tests_root(),
@@ -108,6 +114,7 @@ def run_cr_test(conf):
             "restore",
             "-d",
             "--image-path=%s" % cr_dir,
+            "--work-path=%s" % work_dir,
             "--bundle=%s" % bundle,
             cid
         ])
@@ -154,6 +161,7 @@ def test_cr_pre_dump():
 
     cid = None
     cr_dir = os.path.join(get_tests_root(), 'pre-dump')
+    work_dir = 'work-dir'
     try:
         _, cid = run_and_get_output(
             conf,
@@ -171,6 +179,7 @@ def test_cr_pre_dump():
             "checkpoint",
             "--pre-dump",
             "--image-path=%s" % cr_dir,
+            "--work-path=%s" % work_dir,
             cid
         ])
 
@@ -183,6 +192,7 @@ def test_cr_pre_dump():
             "checkpoint",
             "--parent-path=../pre-dump",
             "--image-path=%s" % cr_dir,
+            "--work-path=%s" % work_dir,
             cid
         ])
 
@@ -202,6 +212,7 @@ def test_cr_pre_dump():
             "-d",
             "--image-path=%s" % cr_dir,
             "--bundle=%s" % bundle,
+            "--work-path=%s" % work_dir,
             cid
         ])
 

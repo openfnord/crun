@@ -246,6 +246,7 @@ ensure_directory_internal_at (int dirfd, char *path, size_t len, int mode, libcr
       if (ret == 0 || errno == EEXIST)
         return 0;
 
+      int saved_errno = errno;
       if (parent_created || errno != ENOENT)
         {
           libcrun_error_t tmp_err = NULL;
@@ -257,7 +258,7 @@ ensure_directory_internal_at (int dirfd, char *path, size_t len, int mode, libcr
           if (ret < 0)
             crun_error_release (&tmp_err);
 
-          return crun_make_error (err, errno, "create directory `%s`", path);
+          return crun_make_error (err, saved_errno, "create directory `%s`", path);
         }
 
       while (it > path && *it != '/')
@@ -294,6 +295,25 @@ crun_ensure_directory_at (int dirfd, const char *path, int mode, bool nofollow, 
 
   if (ret == 0)
     return crun_make_error (err, ENOTDIR, "the path `%s` is not a directory", path);
+
+  return 0;
+}
+
+static int
+check_fd_is_path (const char *path, int fd, const char *fdname, libcrun_error_t *err)
+{
+  proc_fd_path_t fdpath;
+  size_t path_len = strlen (path);
+  char link[PATH_MAX];
+  int ret;
+
+  get_proc_self_fd_path (fdpath, fd);
+  ret = TEMP_FAILURE_RETRY (readlink (fdpath, link, sizeof (link)));
+  if (UNLIKELY (ret < 0))
+    return crun_make_error (err, errno, "readlink `%s`", fdname);
+
+  if (((size_t) ret) != path_len || memcmp (link, path, path_len))
+    return crun_make_error (err, 0, "target `%s` does not point to the directory `%s`", fdname, path);
 
   return 0;
 }
@@ -377,6 +397,23 @@ safe_openat (int dirfd, const char *rootfs, const char *path, int flags, int mod
   static bool openat2_supported = true;
   int ret;
 
+  if (is_empty_string (path))
+    {
+      cleanup_close int fd = -1;
+
+      fd = open (rootfs, flags, mode);
+      if (UNLIKELY (fd < 0))
+        return crun_make_error (err, errno, "open `%s`", rootfs);
+
+      ret = check_fd_is_path (rootfs, fd, path, err);
+      if (UNLIKELY (ret < 0))
+        return ret;
+
+      ret = fd;
+      fd = -1;
+      return ret;
+    }
+
   if (openat2_supported)
     {
     repeat:
@@ -449,7 +486,11 @@ crun_safe_ensure_at (bool do_open, bool dir, int dirfd, const char *dirpath,
 
   /* Empty path, nothing to do.  */
   if (*path == '\0')
-    return 0;
+    {
+      if (do_open)
+        return open (dirpath, O_CLOEXEC | O_PATH, 0);
+      return 0;
+    }
 
   npath = xstrdup (path);
 
@@ -577,12 +618,12 @@ crun_safe_ensure_at (bool do_open, bool dir, int dirfd, const char *dirpath,
 int
 crun_safe_create_and_open_ref_at (bool dir, int dirfd, const char *dirpath, const char *path, int mode, libcrun_error_t *err)
 {
-  int fd;
+  int ret;
 
   /* If the file/dir already exists, just open it.  */
-  fd = safe_openat (dirfd, dirpath, path, O_PATH | O_CLOEXEC, 0, err);
-  if (LIKELY (fd >= 0))
-    return fd;
+  ret = safe_openat (dirfd, dirpath, path, O_PATH | O_CLOEXEC, 0, err);
+  if (LIKELY (ret >= 0))
+    return ret;
 
   crun_error_release (err);
   return crun_safe_ensure_at (true, dir, dirfd, dirpath, path, mode, MAX_READLINKS, err);
@@ -646,7 +687,7 @@ crun_dir_p_at (int dirfd, const char *path, bool nofollow, libcrun_error_t *err)
   if (UNLIKELY (ret < 0))
     return crun_make_error (err, errno, "stat `%s`", path);
 
-  return S_ISDIR (mode);
+  return S_ISDIR (mode) ? 1 : 0;
 }
 
 int
@@ -1061,7 +1102,11 @@ open_unix_domain_client_socket (const char *path, int dgram, libcrun_error_t *er
       path = name_buf;
     }
 
-  strcpy (addr.sun_path, path);
+  size_t path_len = strlen (path);
+  if (path_len >= sizeof (addr.sun_path))
+    return crun_make_error (err, ENAMETOOLONG, "socket path too long: `%s`", path);
+
+  memcpy (addr.sun_path, path, path_len + 1);
   addr.sun_family = AF_UNIX;
   ret = connect (fd, (struct sockaddr *) &addr, sizeof (addr));
   if (UNLIKELY (ret < 0))
@@ -1088,7 +1133,12 @@ open_unix_domain_socket (const char *path, int dgram, libcrun_error_t *err)
       get_proc_self_fd_path (name_buf, fd);
       path = name_buf;
     }
-  strcpy (addr.sun_path, path);
+
+  size_t path_len = strlen (path);
+  if (path_len >= sizeof (addr.sun_path))
+    return crun_make_error (err, ENAMETOOLONG, "socket path too long: `%s`", path);
+
+  memcpy (addr.sun_path, path, path_len + 1);
   addr.sun_family = AF_UNIX;
   ret = bind (fd, (struct sockaddr *) &addr, sizeof (addr));
   if (UNLIKELY (ret < 0))
@@ -1538,37 +1588,55 @@ getsubidrange (uid_t id, int is_uid, uint32_t *from, uint32_t *len)
 
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-size_t
-format_default_id_mapping (char **ret, uid_t container_id, uid_t host_uid, uid_t host_id, int is_uid)
+int
+format_default_id_mapping (char **out, uid_t container_id, uid_t host_uid, uid_t host_id, int is_uid, libcrun_error_t *err)
 {
   uint32_t from = 0, available = 0;
   cleanup_free char *buffer = NULL;
-  size_t written = 0;
+  int written = 0;
+  int ret, remaining;
 
-  *ret = NULL;
+  *out = NULL;
 
   if (getsubidrange (host_uid, is_uid, &from, &available) < 0)
     return 0;
 
   /* More than enough space for all the mappings.  */
-  buffer = xmalloc (15 * 5 * 3);
+  remaining = 15 * 5 * 3;
+  buffer = xmalloc (remaining + 1);
 
   if (container_id > 0)
     {
       uint32_t used = MIN (container_id, available);
-      written += sprintf (buffer + written, "%d %d %d\n", 0, from, used);
+      ret = snprintf (buffer + written, remaining, "%d %d %d\n", 0, from, used);
+      if (UNLIKELY (ret >= remaining))
+        return crun_make_error (err, 0, "internal error: allocated buffer too small");
+
+      written += written;
+      remaining -= ret;
+
       from += used;
       available -= used;
     }
 
   /* Host ID -> Container ID.  */
-  written += sprintf (buffer + written, "%d %d 1\n", container_id, host_id);
+  ret = snprintf (buffer + written, remaining, "%d %d 1\n", container_id, host_id);
+  if (UNLIKELY (ret >= remaining))
+    return crun_make_error (err, 0, "internal error: allocated buffer too small");
+  written += ret;
+  remaining -= ret;
 
   /* Last mapping: use any id that is left.  */
   if (available)
-    written += sprintf (buffer + written, "%d %d %d\n", container_id + 1, from, available);
+    {
+      ret = snprintf (buffer + written, remaining, "%d %d %d\n", container_id + 1, from, available);
+      if (UNLIKELY (ret >= remaining))
+        return crun_make_error (err, 0, "internal error: allocated buffer too small");
+      written += ret;
+      remaining -= ret;
+    }
 
-  *ret = buffer;
+  *out = buffer;
   buffer = NULL;
   return written;
 }
@@ -1818,7 +1886,7 @@ get_current_timestamp (char *out, size_t len)
   gmtime_r (&tv.tv_sec, &now);
   strftime (timestamp, sizeof (timestamp), "%Y-%m-%dT%H:%M:%S", &now);
 
-  snprintf (out, len, "%s.%06lldZ", timestamp, (long long int) tv.tv_usec);
+  (void) snprintf (out, len, "%s.%06lldZ", timestamp, (long long int) tv.tv_usec);
   out[len - 1] = '\0';
 }
 
@@ -2357,11 +2425,17 @@ append_paths (char **out, libcrun_error_t *err, ...)
   return 0;
 }
 
+#if __has_attribute(__nonstring__)
+#  define __nonstring __attribute__ ((__nonstring__))
+#else
+#  define __nonstring
+#endif
+
 /* Adapted from mailutils 0.6.91 (distributed under LGPL 2.0+)  */
 static int
 b64_input (char c)
 {
-  const char table[64] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const char table[64] __nonstring = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   int i;
 
   for (i = 0; i < 64; i++)
@@ -2440,9 +2514,12 @@ has_suffix (const char *str, const char *suffix)
 char *
 str_join_array (int offset, size_t size, char *const array[], const char *joint)
 {
-  size_t jlen, lens[size];
+  size_t jlen;
+  cleanup_free size_t *lens = NULL;
   size_t i, total_size = (size - 1) * (jlen = strlen (joint)) + 1;
   char *result, *p;
+
+  lens = xmalloc (size * sizeof (*lens));
 
   for (i = 0; i < size; ++i)
     {
@@ -2711,7 +2788,7 @@ channel_fd_pair_process (struct channel_fd_pair *channel, int epollfd, libcrun_e
   for (i = 0, repeat = true; i < 1000 && repeat; i++)
     {
       repeat = false;
-      if (ring_buffer_get_space_available (channel->rb) >= ring_buffer_get_size (channel->rb))
+      if (ring_buffer_get_space_available (channel->rb) > 0)
         {
           ret = ring_buffer_read (channel->rb, channel->in_fd, &is_input_eagain, err);
           if (UNLIKELY (ret < 0))

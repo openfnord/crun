@@ -113,7 +113,7 @@ static int
 get_state_directory_status_file (char **out, const char *state_root, const char *id, libcrun_error_t *err)
 {
   cleanup_free char *root = NULL;
-  char *path = NULL;
+  cleanup_free char *path = NULL;
   int ret;
 
   ret = validate_id (id, err);
@@ -142,7 +142,9 @@ read_pid_stat (pid_t pid, struct pid_stat *st, libcrun_error_t *err)
   char *it, *s;
   int i, ret;
 
-  sprintf (pid_stat_file, "/proc/%d/stat", pid);
+  ret = snprintf (pid_stat_file, sizeof (pid_stat_file), "/proc/%d/stat", pid);
+  if (UNLIKELY (ret >= (int) sizeof (pid_stat_file)))
+    return crun_make_error (err, 0, "internal error: static buffer too small");
 
   fd = open (pid_stat_file, O_RDONLY | O_CLOEXEC);
   if (fd < 0)
@@ -492,18 +494,8 @@ libcrun_read_container_status (libcrun_container_status_t *status, const char *s
 int
 libcrun_status_check_directories (const char *state_root, const char *id, libcrun_error_t *err)
 {
-  cleanup_free char *run_directory = NULL;
   cleanup_free char *dir = NULL;
   int ret;
-
-  ret = get_run_directory (&run_directory, state_root, err);
-  if (UNLIKELY (ret < 0))
-    return ret;
-
-  libcrun_debug ("Checking run directory: %s", run_directory);
-  ret = crun_ensure_directory (run_directory, 0700, false, err);
-  if (UNLIKELY (ret < 0))
-    return ret;
 
   ret = libcrun_get_state_directory (&dir, state_root, id, err);
   if (UNLIKELY (ret < 0))

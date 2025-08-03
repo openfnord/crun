@@ -9,18 +9,15 @@
 # krun and wasm support only on aarch64 and x86_64
 %ifarch aarch64 || x86_64
 
-# Disable wasmedge on rhel 10 until EPEL10 is in place, otherwise it causes
-# build issues on copr
-%if %{defined fedora} || (%{defined copr_build} && %{defined rhel} && 0%{?rhel} < 10)
+%if %{defined fedora}
+# krun only exists on fedora
+%global krun_support 1
+%global krun_opts --with-libkrun
+
+# Keep wasmedge enabled only on Fedora. It breaks a lot on EPEL.
 %global wasm_support 1
 %global wasmedge_support 1
 %global wasmedge_opts --with-wasmedge
-%endif
-
-# krun only exists on fedora
-%if %{defined fedora}
-%global krun_support 1
-%global krun_opts --with-libkrun
 %endif
 
 %endif
@@ -69,11 +66,9 @@ BuildRequires: libseccomp-devel
 BuildRequires: python3-libmount
 BuildRequires: libtool
 BuildRequires: protobuf-c-devel
-%ifnarch riscv64
 BuildRequires: criu-devel >= 3.17.1-2
 Recommends: criu >= 3.17.1
 Recommends: criu-libs
-%endif
 %if %{defined wasmedge_support}
 BuildRequires: wasmedge-devel
 %endif
@@ -120,6 +115,9 @@ Recommends: wasmedge
 %install
 %make_install prefix=%{_prefix}
 rm -rf %{buildroot}%{_prefix}/lib*
+
+# Placeholder check to silence rpmlint
+%check
 
 %files
 %license COPYING
